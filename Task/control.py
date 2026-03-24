@@ -8,7 +8,7 @@ import math
 
 class Control:
     altitude_tolerance = 0.02  # meters
-    arm_timout = 20
+    arm_timout = 5
     
     def __init__(self):
         # Setup MAVLink connection
@@ -167,11 +167,12 @@ class Control:
         print("Landed and motors disarmed!")
 
     
-    def move_with_velocity(self, vx, vy, vz, duration, dt=0.1):
+    def move_with_velocity(self, vx, vy, vz, duration, dt=0.1, yaw_rate=0.0):
         """Move the drone with specified velocities for a duration (in seconds)
         vx: forward/backward (positive = forward in drone's direction)
         vy: left/right (positive = right)
         vz: up/down (positive = down in NED frame)
+        yaw_rate: rotation speed around z-axis in rad/s (positive = clockwise)
         """
         end_time = time.time() + duration
         while time.time() < end_time:
@@ -180,10 +181,10 @@ class Control:
                 self.master.target_system,
                 self.master.target_component,
                 mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,  # Changed to body frame
-                0b0000111111000111,  # Use velocity components
+                0b0000011111000111,  # Use velocity components and yaw rate
                 0, 0, 0,  # Position (not used)
                 vx, vy, vz,  # Velocity
                 0, 0, 0,  # Acceleration (not used)
-                0, 0  # Yaw, Yaw rate (not used)
+                0, yaw_rate  # Yaw (not used), Yaw rate
             )
             time.sleep(dt if dt < (end_time - time.time()) else (end_time - time.time()))

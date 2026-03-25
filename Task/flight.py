@@ -1,6 +1,6 @@
 # # Your code here
 
-# Airport = [1,2]
+Airports = [1, 2]
 
 '''
 This contains the opencv, line following stuff. This will make the decisions for the robot based on what the camera sees and 
@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import json
 import os
+import random
 from control import Control
 import time
 import threading
@@ -39,7 +40,7 @@ class Brain:
     YELLOW_UPPER = np.array([40, 255, 255], dtype=np.uint8)
 
     # --- AprilTag / turn settings ---
-    TOTAL_TAGS = 4            # number of AprilTags on the course (last one = land)
+    TOTAL_TAGS = 5            # number of AprilTags on the course (last one = land)
 
     def __init__(self):
         self.control = Control()
@@ -71,10 +72,25 @@ class Brain:
         self._tag_id = -1
         self._last_seen_tag_id = -1   # to avoid re-triggering on same tag
         self._tags_seen_count = 0
+        
+        self._junction_decision = 'straight'
+        self._junction_timeout = 0
 
         # AprilTag detector (OpenCV ArUco with AprilTag dictionary)
         self._aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
         self._aruco_params = cv2.aruco.DetectorParameters()
+        
+        # Optimize ArUco parameters for more robust, forgiving detection
+        self._aruco_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        self._aruco_params.adaptiveThreshWinSizeMin = 3
+        self._aruco_params.adaptiveThreshWinSizeMax = 53
+        self._aruco_params.adaptiveThreshWinSizeStep = 10
+        self._aruco_params.minMarkerPerimeterRate = 0.02
+        self._aruco_params.maxErroneousBitsInBorderRate = 0.5
+        self._aruco_params.errorCorrectionRate = 1.0  # Max out error correction
+        self._aruco_params.polygonalApproxAccuracyRate = 0.08  # More forgiving polygon shape
+        self._aruco_params.perspectiveRemoveIgnoredMarginPerCell = 0.3
+        
         self._aruco_detector = cv2.aruco.ArucoDetector(self._aruco_dict, self._aruco_params)
 
     # -----------------------------------------------------------------
@@ -163,7 +179,10 @@ class Brain:
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_val, morph_val))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        binary[int(h * 0.6):, :] = 0  # Ignore bottom 40% (Lookahead)
+        
+        # Lookahead: Ignore the bottom 15% instead of 40% so it can see 90-degree lines exiting 
+        # horizontally off the bottom corners of the camera view
+        binary[int(h * 0.85):, :] = 0 
 
         # 4. Extract Line Centroid
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -171,28 +190,42 @@ class Brain:
         
         with self._lock:
             self._line_detected = False
-            if contours:
-                largest = max(contours, key=cv2.contourArea)
-                area = cv2.contourArea(largest)
-                cv2.drawContours(debug, [largest], -1, (0, 255, 0), 2)
+            
+            valid_contours = [c for c in contours if cv2.contourArea(c) >= self.MIN_LINE_AREA]
+            
+            if valid_contours:
+                # If there are multiple paths (e.g. at a junction), pick based on our junction choice.
+                # First, sort contours left-to-right based on their centroid X coordinates.
+                def get_cx(c):
+                    M = cv2.moments(c)
+                    return int(M["m10"] / M["m00"]) if M["m00"] > 0 else 0
                 
-                if area >= self.MIN_LINE_AREA:
-                    M = cv2.moments(largest)
-                    if M["m00"] > 0:
-                        cx = int(M["m10"] / M["m00"])
-                        cy = int(M["m01"] / M["m00"])
-                        self._line_detected = True
-                        self._error = (cx - w / 2) / (w / 2)
-                        self._frame_width = w
-                        
-                        # Draw visuals
-                        cv2.circle(debug, (cx, cy), 6, (0, 0, 255), -1)
-                        cv2.line(debug, (w // 2, 0), (w // 2, h), (0, 255, 255), 1)
-                        cv2.putText(debug, f"err={self._error:+.2f} area={area:.0f}", 
-                                    (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                valid_contours.sort(key=get_cx)
+                
+                # Default is the largest contour, but if we expect a multiple-path junction:
+                if len(valid_contours) > 1 and getattr(self, '_junction_choice', -1) != -1:
+                    # Pick a branch randomly assigned earlier, modding by length to be safe.
+                    idx = min(self._junction_choice, len(valid_contours) - 1)
+                    chosen = valid_contours[idx]
                 else:
-                    cv2.putText(debug, f"TOO SMALL ({area:.0f})", (5, 15),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    chosen = max(valid_contours, key=cv2.contourArea)
+                
+                area = cv2.contourArea(chosen)
+                cv2.drawContours(debug, [chosen], -1, (0, 255, 0), 2)
+                
+                M = cv2.moments(chosen)
+                if M["m00"] > 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    self._line_detected = True
+                    self._error = (cx - w / 2) / (w / 2)
+                    self._frame_width = w
+                    
+                    # Draw visuals
+                    cv2.circle(debug, (cx, cy), 6, (0, 0, 255), -1)
+                    cv2.line(debug, (w // 2, 0), (w // 2, h), (0, 255, 255), 1)
+                    cv2.putText(debug, f"err={self._error:+.2f} area={area:.0f}", 
+                                (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             else:
                 cv2.putText(debug, "NO LINE", (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
@@ -216,12 +249,22 @@ class Brain:
     def line_follow(self):
         """
         Main line-following logic using PID control.
-        Moves forward at a constant speed while correcting laterally
-        to keep the yellow line centred in the frame.
-        When an AprilTag is detected, turn 90° right and continue.
-        On the last AprilTag, land.
+        Searches the graph of airports to fulfill the sequence of Targets.
         """
         print("Starting yellow-line following…")
+        
+        # Filter valid target destinations and start queue
+        target_airports = [a for a in Airports if a != 0]
+        current_target_idx = 0
+        
+        if len(target_airports) == 0:
+            print("No valid airports defined in 'Airports' array. Exiting.")
+            self.control.land()
+            return
+            
+        print(f"Target destinations sequence: {target_airports}")
+        current_target = target_airports[current_target_idx]
+        
         self._integral = 0.0
         self._prev_error = 0.0
         dt = 0.05  # control loop period (s)
@@ -234,25 +277,73 @@ class Brain:
 
             if tag_event:
                 self._tags_seen_count += 1
-                print(f"[TAG] AprilTag #{tag_id} detected! (tag {self._tags_seen_count}/{self.TOTAL_TAGS})")
+                
+                # Convert the tag_id to a 3-character string and separate it into 3 digits
+                # padding with zeros if necessary (e.g. 15 -> "015")
+                tag_str = str(tag_id).zfill(3)
+                
+                country_code = int(tag_str[0])
+                status = int(tag_str[1])
+                reachable = int(tag_str[2])
+
+                print(f"[TAG] Airport Detected! Tag ID: {tag_id} ({self._tags_seen_count}/{self.TOTAL_TAGS})")
+                print(f"      - Country Code: {country_code}")
+                print(f"      - Status: {'OK to Land' if status == 1 else 'Cannot Land'}")
+                print(f"      - Reachable Airports: {reachable}")
+
+                # If there are multiple branches from this node, pick one at random
+                with self._lock:
+                    if reachable > 1:
+                        self._junction_choice = random.randint(0, reachable - 1)
+                        print(f"[TAG] Node has {reachable} branches. Setting junction logic to pick branch #{self._junction_choice}.")
+                    else:
+                        self._junction_choice = -1 # Default behavior
 
                 # Acknowledge tag so we don't re-trigger
                 with self._lock:
                     self._tag_detected = False
                     self._last_seen_tag_id = tag_id
 
-                # Last tag → land
-                if self._tags_seen_count == 2:
-                    print("[TAG] Last AprilTag reached — landing!")
+                # Evaluate if this is the currently required valid airport
+                if country_code == current_target and status == 1:
+                    print(f"[TAG] Valid airport found for target country {current_target}! Hovering on platform...")
+                    # Stay in the landing platform for 4 seconds, don't turn off motors
+                    self.control.move_with_velocity(vx=0, vy=0, vz=0, duration=4, dt=0.1)
+                    
+                    # Advance to next target in sequence
+                    current_target_idx += 1
+                    if current_target_idx >= len(target_airports):
+                        print("[MISSION] Successfully visited all target airports. Mission Complete!")
+                        self.control.land()
+                        return
+                    
+                    # More targets remaining -> resume flying!
+                    current_target = target_airports[current_target_idx]
+                    print(f"[MISSION] Next target country objective is: {current_target}")
+                    print("[MISSION] Resuming search from platform...")
+                    
+                    print("[MISSION] Airborne. Re-aligning with line...")
+                    self.control.move_with_velocity(vx=0.2, vy=0, vz=0, duration=3, dt=0.1)
+                    
+                    self._integral = 0.0
+                    self._prev_error = 0.0
+                    self._tags_seen_count = 0  # Reset graph counter since we are at a new node
+                    continue
+
+                # Last tag fallback → land
+                if self._tags_seen_count >= self.TOTAL_TAGS:
+                    print("[TAG] Visited max node limit without finding valid target — landing anyway.")
                     self.control.land()
                     return
 
-                # Otherwise turn 90° right and keep following
-                print("[TAG] Turning 90° right…")
-                self.control.turn_yaw(90)
-                # Reset PID state after turn
+                # Otherwise keep following the line straight to the next airport
+                print(f"[TAG] Condition does not match (needs Country {current_target} & OK to Land).")
+                print(f"[TAG] Continuing search through connected nodes...")
+                
+                # We do NOT turn 90° anymore! Just follow the line.
+                # Reset PID state to prevent sudden jerks, but keep _prev_error in memory
+                # so the drone knows which way to turn if it temporarily loses the line at 90-deg junctions!
                 self._integral = 0.0
-                self._prev_error = 0.0
                 continue
 
             with self._lock:
@@ -298,9 +389,26 @@ class Brain:
                     yaw_rate=yaw_rate
                 )
             else:
-                # No line seen — hover in place and wait
-                print("[FOLLOW] no line detected — hovering")
-                self.control.move_with_velocity(0, 0, 0, duration=dt, dt=dt)
+                # No line seen — attempt recovery
+                # Rotate in the direction of the last known error to search for the line
+                # This specifically handles 90-degree corners where the drone might initially fly past the track
+                spin_speed = 0.5  # rad/s max spin
+                
+                # Make the drone rotate in place towards the last seen side
+                direction = 1 if self._prev_error > 0 else -1
+                recovery_yaw = spin_speed * direction
+                
+                print(f"[FOLLOW] no line detected — recovering! yaw={recovery_yaw:+.2f}")
+                
+                # Cut forward velocity, just spin in place
+                self.control.move_with_velocity(
+                    vx=0.0,
+                    vy=0.0,
+                    vz=0,
+                    duration=dt,
+                    dt=dt,
+                    yaw_rate=recovery_yaw
+                )
 
             time.sleep(dt)
 

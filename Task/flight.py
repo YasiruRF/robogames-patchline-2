@@ -17,18 +17,16 @@ import threading
 from sensor import Camera
 
 class Brain:
-    CONFIG_FILE = "tuning_params.json"
-
     # --- Default tuning ---
     DEFAULT_TUNING = {
-        "GRAY_THRESH": 190,
-        "BLUR_SIZE_K": 7,     # Trackbar value, real kernel is k*2+1 (15)
-        "MORPH_SIZE_K": 7,    # Trackbar value, real kernel is k*2+1 (15)
+        "GRAY_THRESH": 140,
+        "BLUR_SIZE_K": 8,     # Trackbar value, real kernel is k*2+1
+        "MORPH_SIZE_K": 7,    # Trackbar value, real kernel is k*2+1
         "KP": 40,             # Divided by 100 -> 0.4
         "KI": 0,              # Divided by 100 -> 0.0
         "KD": 10,             # Divided by 100 -> 0.1
         "K_YAW_RATE": 120,    # Divided by 100 -> 1.2
-        "FORWARD_SPEED": 15,  # Divided by 100 -> 0.15
+        "FORWARD_SPEED": 13,  # Divided by 100 -> 0.13
         "MAX_LATERAL_SPEED": 3 # Divided by 100 -> 0.03
     }
 
@@ -48,14 +46,6 @@ class Brain:
 
         # Load configuration
         self.tuning = self.DEFAULT_TUNING.copy()
-        if os.path.exists(self.CONFIG_FILE):
-            try:
-                with open(self.CONFIG_FILE, 'r') as f:
-                    saved = json.load(f)
-                    self.tuning.update(saved)
-                print("Loaded saved tuning params.")
-            except Exception as e:
-                print(f"Could not load tuning params: {e}")
 
         # Shared state between camera thread and control loop
         self._lock = threading.Lock()
@@ -104,48 +94,6 @@ class Brain:
         h, w = frame.shape[:2]
         is_color = len(frame.shape) == 3 and frame.shape[2] >= 3
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if is_color else frame
-
-        # --- Interactive Tuning UI ---
-        if not hasattr(self, '_tuning_init'):
-            cv2.namedWindow("Tuning", cv2.WINDOW_NORMAL)
-            cv2.resizeWindow("Tuning", 400, 450)
-            
-            # Create trackbars set to currently loaded tuning values
-            cv2.createTrackbar("Thresh(0=Auto)", "Tuning", self.tuning["GRAY_THRESH"], 255, lambda x: None)
-            cv2.createTrackbar("Blur(x2+1)", "Tuning", self.tuning["BLUR_SIZE_K"], 20, lambda x: None)
-            cv2.createTrackbar("Morph(x2+1)", "Tuning", self.tuning["MORPH_SIZE_K"], 20, lambda x: None)
-            
-            # PID & Speed tuning (Values multiplied by 100 for trackbar)
-            cv2.createTrackbar("KP (/100)", "Tuning", self.tuning["KP"], 200, lambda x: None)
-            cv2.createTrackbar("KI (/100)", "Tuning", self.tuning["KI"], 100, lambda x: None)
-            cv2.createTrackbar("KD (/100)", "Tuning", self.tuning["KD"], 200, lambda x: None)
-            cv2.createTrackbar("YawRate (/100)", "Tuning", self.tuning["K_YAW_RATE"], 300, lambda x: None)
-            cv2.createTrackbar("FwdSpd (/100)", "Tuning", self.tuning["FORWARD_SPEED"], 50, lambda x: None)
-            cv2.createTrackbar("LatSpd (/100)", "Tuning", self.tuning["MAX_LATERAL_SPEED"], 20, lambda x: None)
-            
-            self._tuning_init = True
-            
-        # Read current trackbar values
-        new_tuning = {
-            "GRAY_THRESH": cv2.getTrackbarPos("Thresh(0=Auto)", "Tuning"),
-            "BLUR_SIZE_K": cv2.getTrackbarPos("Blur(x2+1)", "Tuning"),
-            "MORPH_SIZE_K": cv2.getTrackbarPos("Morph(x2+1)", "Tuning"),
-            "KP": cv2.getTrackbarPos("KP (/100)", "Tuning"),
-            "KI": cv2.getTrackbarPos("KI (/100)", "Tuning"),
-            "KD": cv2.getTrackbarPos("KD (/100)", "Tuning"),
-            "K_YAW_RATE": cv2.getTrackbarPos("YawRate (/100)", "Tuning"),
-            "FORWARD_SPEED": cv2.getTrackbarPos("FwdSpd (/100)", "Tuning"),
-            "MAX_LATERAL_SPEED": cv2.getTrackbarPos("LatSpd (/100)", "Tuning")
-        }
-
-        # Save if changed
-        if new_tuning != self.tuning:
-            self.tuning = new_tuning
-            try:
-                with open(self.CONFIG_FILE, 'w') as f:
-                    json.dump(self.tuning, f, indent=4)
-            except Exception as e:
-                print(f"Error saving tuning params: {e}")
 
         # Derive actual usage values
         thresh_val = self.tuning["GRAY_THRESH"]

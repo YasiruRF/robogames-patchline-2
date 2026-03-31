@@ -306,9 +306,21 @@ class Brain:
 
                 # Evaluate if this is the currently required valid airport
                 if country_code == current_target and status == 1:
-                    print(f"[TAG] Valid airport found for target country {current_target}! Hovering on platform...")
+                    print(f"[TAG] Valid airport found for target country {current_target}! Landing on platform...")
+                    
+                    # Land descending slowly (positive vz is down in NED frame)
+                    self.control.move_with_velocity(vx=0, vy=0, vz=0.5, duration=2.5, dt=0.1)
+
                     # Stay in the landing platform for 4 seconds, don't turn off motors
+                    print("[TAG] Waiting on platform for 4 seconds...")
                     self.control.move_with_velocity(vx=0, vy=0, vz=0, duration=4, dt=0.1)
+                    
+                    # Lift back up to ~1m (negative vz is up in NED frame)
+                    print("[TAG] Lifting back to 1m...")
+                    self.control.move_with_velocity(vx=0, vy=0, vz=-0.5, duration=2.5, dt=0.1)
+                    
+                    # Stabilize hover before continuing
+                    self.control.move_with_velocity(vx=0, vy=0, vz=0, duration=1, dt=0.1)
                     
                     # Advance to next target in sequence
                     current_target_idx += 1

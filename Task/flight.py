@@ -1,6 +1,5 @@
-# # Your code here
 
-Airports = [1, 2]
+Airports = [4, 0]
 
 '''
 This contains the opencv, line following stuff. This will make the decisions for the robot based on what the camera sees and 
@@ -100,8 +99,10 @@ class Brain:
         blur_val = max(1, self.tuning["BLUR_SIZE_K"] * 2 + 1)
         morph_val = max(1, self.tuning["MORPH_SIZE_K"] * 2 + 1)
 
-        # 1. AprilTag detection
-        corners, ids, _ = self._aruco_detector.detectMarkers(gray)
+        # 1. AprilTag detection (using CLAHE for robust lighting handling)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        contrast_gray = clahe.apply(gray)
+        corners, ids, _ = self._aruco_detector.detectMarkers(contrast_gray)
         if ids is not None and len(ids) > 0:
             tag_id = int(ids[0][0])
             with self._lock:
@@ -152,10 +153,13 @@ class Brain:
                 
                 # Default is the largest contour, but if we expect a multiple-path junction:
                 if len(valid_contours) > 1 and getattr(self, '_junction_choice', -1) != -1:
-                    # Pick a branch randomly assigned earlier, modding by length to be safe.
+                    # Sort primarily by x-position to reliably distinguish left from right paths
+                    valid_contours.sort(key=get_cx)
+                    # Pick a branch securely within index bounds.
                     idx = min(self._junction_choice, len(valid_contours) - 1)
                     chosen = valid_contours[idx]
                 else:
+                    # In normal flight with 1 contour, or if junction logic expired, pick largest
                     chosen = max(valid_contours, key=cv2.contourArea)
                 
                 area = cv2.contourArea(chosen)
@@ -167,6 +171,7 @@ class Brain:
                     cy = int(M["m01"] / M["m00"])
                     self._line_detected = True
                     self._error = (cx - w / 2) / (w / 2)
+                    
                     self._frame_width = w
                     
                     # Draw visuals
@@ -239,13 +244,23 @@ class Brain:
                 print(f"      - Status: {'OK to Land' if status == 1 else 'Cannot Land'}")
                 print(f"      - Reachable Airports: {reachable}")
 
-                # If there are multiple branches from this node, pick one at random
+                # If there are multiple branches from this node, follow a systematic approach
                 with self._lock:
                     if reachable > 1:
+                        # Since we want to definitely turn towards the selected path, we should stop 
+                        # trying to pick right-hand, and pick one that the drone sees clearly, or use 
+                        # the specific logic for the arena. Usually tag logic turns 90deg left/right or goes straight.
+                        # Right now, let's just pick one dynamically or randomly, but add a junction_timeout 
+                        # to ensure the drone locks onto that choice for a duration instead of re-evaluating constantly.
+                        
                         self._junction_choice = random.randint(0, reachable - 1)
+                        # Set a timeout so we don't accidentally switch targets mid-junction while contours merge
+                        self._junction_timeout = time.time() + 3.0  # Lock this choice for 3 seconds
+                        
                         print(f"[TAG] Node has {reachable} branches. Setting junction logic to pick branch #{self._junction_choice}.")
                     else:
-                        self._junction_choice = -1 # Default behavior
+                        if time.time() > self._junction_timeout:
+                            self._junction_choice = -1 # Default behavior
 
                 # Acknowledge tag so we don't re-trigger
                 with self._lock:
@@ -300,6 +315,30 @@ class Brain:
                 print(f"[TAG] Condition does not match (needs Country {current_target} & OK to Land).")
                 print(f"[TAG] Continuing search through connected nodes...")
                 
+                # If we just chose a branch at a junction, execute a hard maneuver towards that direction
+                with self._lock:
+                    choice = getattr(self, '_junction_choice', -1)
+                
+                if choice != -1 and reachable > 1:
+                    # Execute a hard maneuver for 3 seconds in the chosen direction to commit to the path.
+                    # choice=0 generally means left branch, choice>0 means right/straight.
+                    print(f"[TAG] Executing hard push towards branch {choice} for 3 seconds.")
+                    
+                    # Convert choice to a lateral velocity push (negative is left, positive is right)
+                    lat_push = -0.5 if choice == 0 else 0.5 
+                    turning_yaw = -1.0 if choice == 0 else 1.0
+                    
+                    # Command the drone to push hard laterally & yaw into the turn for 3 seconds
+                    self.control.move_with_velocity(
+                        vx=self.tuning["FORWARD_SPEED"] / 100.0,
+                        vy=lat_push,
+                        vz=0, 
+                        duration=1.0, 
+                        dt=0.1,
+                        yaw_rate=turning_yaw
+                    )
+                    print("[TAG] Hard push complete. Resuming normal line following.")
+                
                 # We do NOT turn 90° anymore! Just follow the line.
                 # Reset PID state to prevent sudden jerks, but keep _prev_error in memory
                 # so the drone knows which way to turn if it temporarily loses the line at 90-deg junctions!
@@ -317,7 +356,7 @@ class Brain:
                 kd = self.tuning["KD"] / 100.0
                 k_yaw_rate = self.tuning["K_YAW_RATE"] / 100.0
                 max_lat_spd = self.tuning["MAX_LATERAL_SPEED"] / 100.0
-                fwd_spd = self.tuning["FORWARD_SPEED"] / 100.0
+                base_fwd_spd = self.tuning["FORWARD_SPEED"] / 100.0
 
                 # PID calculation
                 self._integral += error * dt
@@ -327,16 +366,21 @@ class Brain:
                               kd * derivative)
                 self._prev_error = error
 
+                # Dynamic speed adjustment for fast but smooth flight
+                # Slow down proportional to the absolute error (sharpness of turn)
+                speed_factor = max(0.4, 1.0 - abs(error) * 1.5)
+                fwd_spd = base_fwd_spd * speed_factor
+
                 # Clamp lateral speed
                 vy = max(-max_lat_spd,
                          min(max_lat_spd, correction * 0.5))
 
                 # Control yaw rate to turn into the curve instead of just sliding sideways
-                MAX_YAW_RATE = 0.8
+                MAX_YAW_RATE = 1.0
                 yaw_rate = k_yaw_rate * correction
                 yaw_rate = max(-MAX_YAW_RATE, min(MAX_YAW_RATE, yaw_rate))
 
-                print(f"[FOLLOW] error={error:+.2f}  vy={vy:+.3f}  yaw={yaw_rate:+.2f} vx={fwd_spd}")
+                print(f"[FOLLOW] err={error:+.2f}  vy={vy:+.3f}  yaw={yaw_rate:+.2f}  vx={fwd_spd:.3f} (base {base_fwd_spd})")
 
                 # Move: forward (vx) + lateral correction (vy) + yaw (turn into curves)
                 # vz = 0 → maintain altitude
@@ -351,14 +395,22 @@ class Brain:
             else:
                 # No line seen — attempt recovery
                 # Rotate in the direction of the last known error to search for the line
-                # This specifically handles 90-degree corners where the drone might initially fly past the track
-                spin_speed = 0.5  # rad/s max spin
-                
-                # Make the drone rotate in place towards the last seen side
+                # If we were explicitly tracking a junction branch, rely on that memory
+                spin_speed = 0.6  # rad/s max spin - assertive but not too violent
+
                 direction = 1 if self._prev_error > 0 else -1
+                
+                # If we just passed an AprilTag with multiple paths and lost the line, 
+                # we are likely overshooting the sharp 90-degree bend.
+                # Nudge the spin direction to match our junction choice.
+                if getattr(self, '_junction_choice', -1) != -1 and time.time() < self._junction_timeout:
+                    # In a 2-way split, 0 is Left, 1 is Right (based on get_cx sort)
+                    # Force the recovery spin direction towards our chosen split.
+                    direction = -1 if self._junction_choice == 0 else 1
+                    
                 recovery_yaw = spin_speed * direction
                 
-                print(f"[FOLLOW] no line detected — recovering! yaw={recovery_yaw:+.2f}")
+                print(f"[FOLLOW] no line detected — recovering! yaw={recovery_yaw:+.2f} directed_by_junction={getattr(self, '_junction_choice', -1)}")
                 
                 # Cut forward velocity, just spin in place
                 self.control.move_with_velocity(

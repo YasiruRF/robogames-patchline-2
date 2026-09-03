@@ -11,6 +11,25 @@ This repository contains:
 - **Containerized ArduPilot SITL** setup for easy deployment
 - **Helper scripts** to run the simulation with minimal configuration
 
+## My RoboGames Work (Task Python Implementation)
+
+My competition implementation is in the `Task/` Python files:
+
+- `Task/flight.py` — mission logic and decision-making:
+  - yellow-line following with PID-based correction
+  - AprilTag detection and parsing (`country/status/reachable`)
+  - target-airport sequence handling using the `Airports` list
+  - landing/hold/takeoff cycle at valid airports and mission completion landing
+- `Task/control.py` — MAVLink flight-control wrapper:
+  - connect to ArduPilot SITL
+  - mode switching, arming, takeoff, yaw control, landing
+  - body-frame velocity commands for continuous motion control
+- `Task/sensor.py` — TCP camera client:
+  - threaded frame receiver from the simulator camera stream
+  - frame decoding and callback delivery for vision processing
+
+I only edited Python files under `Task/` for my RoboGames solution.
+
 **We strongly recommend using the containerized version** to avoid installation overhead and compatibility issues. While you can install Webots and ArduPilot manually if preferred, the containerized approach ensures a consistent environment.
 
 The drone configuration uses the same Iris quadcopter from ArduPilot's default examples, so it should work without parameter modifications.
